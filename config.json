@@ -1,0 +1,51 @@
+{
+  "sharedHeaders": {
+    "accept": "application/json, text/plain, */*",
+    "accept-language": "en-CA,en-US;q=0.9,en;q=0.8",
+    "cache-control": "no-cache, no-store",
+    "content-type": "application/json",
+    "origin": "https://onlinebusiness.icbc.com",
+    "pragma": "no-cache",
+    "referer": "https://onlinebusiness.icbc.com/webdeas-ui/login;type=driver",
+    "sec-ch-ua": "\"Not)A;Brand\";v=\"8\", \"Chromium\";v=\"138\", \"Google Chrome\";v=\"138\"",
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": "\"Windows\"",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+  },
+  "search_criteria": {
+    "aPosID": [1, 153, 270, 223],
+    "examDate": "2025-08-13",
+    "examType": "7-R-1",
+    "prfDaysOfWeek": [0, 1, 2, 3, 4, 5, 6],
+    "prfPartsOfDay": [0, 1],
+    "lastName": "MEHTA",
+    "licenseNumber": "3428354",
+    "latitude": 49.2827,
+    "longitude": -123.1207
+  },
+  "endpoints": {
+    "getAppointments": {
+      "url": "https://onlinebusiness.icbc.com/deas-api/v1/web/getAvailableAppointments",
+      "method": "POST"
+    },
+    "getNearestPos": {
+      "url": "https://onlinebusiness.icbc.com/deas-api/v1/web/getNearestPos",
+      "method": "PUT"
+    },
+    "updateToken": {
+      "url": "https://onlinebusiness.icbc.com/deas-api/v1/webLogin/webLogin",
+      "method": "PUT"
+    },
+    "lockAppointment": {
+      "url": "https://onlinebusiness.icbc.com/deas-api/v1/web/lockAppointment",
+      "method": "POST"
+    }
+  },
+  "polling": {
+    "baseIntervalSeconds": 4,
+    "randomJitterSeconds": 3
+  }
+}
