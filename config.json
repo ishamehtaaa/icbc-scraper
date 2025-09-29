@@ -1,4 +1,5 @@
 {
+  "driver_id": 1503897,
   "sharedHeaders": {
     "accept": "application/json, text/plain, */*",
     "accept-language": "en-CA,en-US;q=0.9,en;q=0.8",
@@ -15,17 +16,6 @@
     "sec-fetch-site": "same-origin",
     "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
   },
-  "search_criteria": {
-    "aPosID": [1, 153, 270, 223],
-    "examDate": "2025-08-13",
-    "examType": "7-R-1",
-    "prfDaysOfWeek": [0, 1, 2, 3, 4, 5, 6],
-    "prfPartsOfDay": [0, 1],
-    "lastName": "MEHTA",
-    "licenseNumber": "3428354",
-    "latitude": 49.2827,
-    "longitude": -123.1207
-  },
   "endpoints": {
     "getAppointments": {
       "url": "https://onlinebusiness.icbc.com/deas-api/v1/web/getAvailableAppointments",
@@ -40,12 +30,33 @@
       "method": "PUT"
     },
     "lockAppointment": {
-      "url": "https://onlinebusiness.icbc.com/deas-api/v1/web/lockAppointment",
+      "url": "https://onlinebusiness.icbc.com/deas-api/v1/web/lock",
+      "method": "PUT"
+    },
+    "sendOTP": {
+      "url": "https://onlinebusiness.icbc.com/deas-api/v1/web/sendOTP",
       "method": "POST"
+    },
+    "verifyOTP": {
+      "url": "https://onlinebusiness.icbc.com/deas-api/v1/web/verifyOTP",
+      "method": "PUT"
+    },
+    "book": {
+      "url": "https://onlinebusiness.icbc.com/deas-api/v1/web/book",
+      "method": "PUT"
     }
   },
+  "search_criteria": {
+    "aPosID": [1],
+    "examType": "7-R-1",
+    "prfDaysOfWeek": [0,1,2,3,4,5,6],
+    "prfPartsOfDay": [0,1],
+    "examDate": "2025-10-14",
+    "latitude": 49.2827,
+    "longitude": -123.1207
+  },
   "polling": {
-    "baseIntervalSeconds": 4,
-    "randomJitterSeconds": 3
+    "baseIntervalSeconds": 2,
+    "randomJitterSeconds": 5
   }
 }

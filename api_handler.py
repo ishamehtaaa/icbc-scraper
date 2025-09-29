@@ -5,7 +5,10 @@ import json
 import logging
 import os
 from typing import List, Dict, Any, Optional
-from app_config import Settings, AppointmentSlot, ConfirmationPayload, Pos
+from app_config import (
+    Settings, AppointmentSlot, ConfirmationPayload, Pos, OtpPayload,
+    VerifyOtpPayload, BookPayload, BookAppointment, BookDrvrDriver
+)
 
 log = logging.getLogger()
 
@@ -14,8 +17,9 @@ class APIHandler:
         self.settings = settings
         self.session = requests.Session()
         self.last_name = os.getenv("LAST_NAME")
-        self.license_number = os.getenv("LICENSE_NUMBER") # Reads from .env
+        self.license_number = os.getenv("LICENSE_NUMBER")
         self.keyword = os.getenv("KEYWORD")
+        self.driver_id = settings.driver_id
         self.detailed = detailed
         self.location_cache: Dict[int, Pos] = {}
 
@@ -59,7 +63,6 @@ class APIHandler:
 
     def update_token(self) -> None:
         log.info("Requesting new bearer token...")
-        # UPDATED: Using 'licenceNumber' for the token endpoint
         payload = {"drvrLastName": self.last_name, "licenceNumber": self.license_number, "keyword": self.keyword}
         response = self._make_request("updateToken", payload)
         if not response:
@@ -111,7 +114,6 @@ class APIHandler:
                 "prfDaysOfWeek": json.dumps(crit.prfDaysOfWeek, separators=(',', ':')),
                 "prfPartsOfDay": json.dumps(crit.prfPartsOfDay, separators=(',', ':')),
                 "lastName": self.last_name,
-                # UPDATED: Using 'licenseNumber' for the appointments endpoint
                 "licenseNumber": self.license_number
             }
             response = self._make_request("getAppointments", payload)
@@ -132,4 +134,38 @@ class APIHandler:
     def lock_appointment(self, payload: ConfirmationPayload) -> Optional[Dict]:
         log.info("Attempting to lock appointment...")
         response = self._make_request("lockAppointment", payload.model_dump())
+        return response.json() if response else None
+
+    def send_otp(self, booked_ts: str) -> Optional[Dict]:
+        log.info("Requesting OTP for the booked appointment...")
+        payload = OtpPayload(
+            bookedTs=booked_ts,
+            drvrID=self.driver_id,
+            method="S"
+        )
+        response = self._make_request("sendOTP", payload.model_dump())
+        return response.json() if response else None
+
+    # UPDATED: Added new methods for the final two booking steps
+    def verify_otp(self, booked_ts: str, otp_code: str) -> Optional[Dict]:
+        log.info("Verifying OTP code...")
+        payload = VerifyOtpPayload(
+            bookedTs=booked_ts,
+            drvrID=self.driver_id,
+            code=otp_code.strip()
+        )
+        response = self._make_request("verifyOTP", payload.model_dump())
+        return response.json() if response else None
+
+    def confirm_booking(self) -> Optional[Dict]:
+        log.info("Sending final booking confirmation...")
+        payload = BookPayload(
+            userId=f"WEBD:{self.driver_id}",
+            appointment=BookAppointment(
+                drvrDriver=BookDrvrDriver(
+                    drvrId=self.driver_id
+                )
+            )
+        )
+        response = self._make_request("book", payload.model_dump())
         return response.json() if response else None

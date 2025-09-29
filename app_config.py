@@ -6,9 +6,10 @@ from typing import List, Dict, Optional
 from pydantic import BaseModel, ValidationError
 from dotenv import load_dotenv
 
+# ... other models are unchanged ...
+
 class TokenPayload(BaseModel):
     drvrLastName: str
-    # UPDATED: Using 'licenceNumber' to match the token API
     licenceNumber: str
     keyword: str
 
@@ -17,7 +18,6 @@ class Pos(BaseModel):
     agency: str
     city: str
 
-# ... rest of the file is unchanged ...
 class AppointmentDateTime(BaseModel):
     date: str
     dayOfWeek: str
@@ -35,18 +35,41 @@ class ConfirmationDlExam(BaseModel):
     description: str
 
 class ConfirmationDrvrDriver(BaseModel):
-    drvrId: str
+    drvrId: int
 
 class ConfirmationPayload(BaseModel):
     appointmentDt: AppointmentDateTime
     dlExam: ConfirmationDlExam
     drvrDriver: ConfirmationDrvrDriver
+    drscDrvSchl: dict
+    instructorDlNum: Optional[str] = None
     bookedTs: str
     startTm: str
     endTm: str
     posId: int
     resourceId: int
     signature: str
+
+class OtpPayload(BaseModel):
+    bookedTs: str
+    drvrID: int
+    method: str
+
+# UPDATED: Added new models for the final booking steps
+class VerifyOtpPayload(BaseModel):
+    bookedTs: str
+    drvrID: int
+    code: str
+
+class BookDrvrDriver(BaseModel):
+    drvrId: int
+
+class BookAppointment(BaseModel):
+    drvrDriver: BookDrvrDriver
+
+class BookPayload(BaseModel):
+    userId: str
+    appointment: BookAppointment
 
 class SearchCriteria(BaseModel):
     aPosID: List[int]
@@ -66,6 +89,7 @@ class Polling(BaseModel):
     randomJitterSeconds: int
 
 class Settings(BaseModel):
+    driver_id: int
     sharedHeaders: Dict[str, str]
     search_criteria: SearchCriteria
     endpoints: Dict[str, Endpoint]
@@ -96,7 +120,6 @@ def format_appointment_message(slot: AppointmentSlot, location_cache: Dict[int, 
 def load_settings(filepath: str) -> Optional[Settings]:
     log = logging.getLogger()
     load_dotenv()
-    # This remains 'LICENSE_NUMBER' as it's just the key for the .env file
     required_credentials = ["LAST_NAME", "LICENSE_NUMBER", "KEYWORD"]
     if not all(os.getenv(cred) for cred in required_credentials):
         log.critical(f"One or more required environment variables are missing.")
