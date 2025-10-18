@@ -37,7 +37,7 @@ class Settings(BaseModel):
 
 
 def setup_logging(level=logging.INFO):
-    """Setup logging with thread names in the format."""
+    """Setup logging configuration."""
     log = logging.getLogger()
     if log.handlers:
         return
@@ -48,7 +48,7 @@ def setup_logging(level=logging.INFO):
         handler = colorlog.StreamHandler()
         handler.setFormatter(
             colorlog.ColoredFormatter(
-                "%(log_color)s%(asctime)s - [%(threadName)s] - %(levelname)s - %(message)s",
+                "%(log_color)s%(asctime)s - %(levelname)s - %(message)s",
                 log_colors={
                     "DEBUG": "cyan",
                     "INFO": "white",
@@ -62,7 +62,7 @@ def setup_logging(level=logging.INFO):
         handler = logging.StreamHandler()
         handler.setFormatter(
             logging.Formatter(
-                "%(asctime)s - [%(threadName)s] - %(levelname)s - %(message)s"
+                "%(asctime)s - %(levelname)s - %(message)s"
             )
         )
 

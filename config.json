@@ -34,8 +34,8 @@
       1
     ],
     "examDate": "2025-10-19",
-    "latitude": 49.2827,
-    "longitude": -123.1207
+    "latitude": 0.00,
+    "longitude": -0.1207
   },
   "endpoints": {
     "getAppointments": {

@@ -40,12 +40,6 @@ def setup_argument_parser():
         help="Maximum number of days ahead to search for appointments (default: 30)",
     )
     parser.add_argument(
-        "--threads",
-        type=int,
-        default=1,
-        help="Number of concurrent polling threads to run (default: 1, max recommended: 5)",
-    )
-    parser.add_argument(
         "--config",
         type=str,
         default="config.json",
@@ -346,13 +340,6 @@ def main():
             else:
                 sys.exit(1)
 
-        # Validate thread count
-        num_threads = max(1, min(args.threads, 10))  # Limit between 1 and 10
-        if num_threads != args.threads:
-            log.warning(
-                f"Thread count adjusted to {num_threads} (must be between 1 and 10)"
-            )
-
         # Start the appointment poller
         poller = AppointmentPoller(
             settings=settings,
@@ -361,8 +348,7 @@ def main():
             detailed=args.detailed,
         )
 
-        poller.start(num_threads=num_threads)
-        poller.wait_for_completion()
+        poller.start()
 
     except KeyboardInterrupt:
         log.info("\nScript stopped by user. Goodbye! 👋")

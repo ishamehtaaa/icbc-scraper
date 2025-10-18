@@ -62,18 +62,35 @@ class ICBCApiClient:
             json_payload = json.dumps(payload, separators=(",", ":"))
 
             if self.detailed:
-                self.log.debug(
-                    f"--- REQUEST [{endpoint.method}] -> {endpoint.url} ---")
-                self.log.debug(f"Headers: {self.session.headers}")
-                self.log.debug(f"Payload: {json_payload}")
+                self.log.debug(f"\n{'='*80}")
+                self.log.debug(f"API REQUEST: {endpoint_name}")
+                self.log.debug(f"{'='*80}")
+                self.log.debug(f"Method: {endpoint.method}")
+                self.log.debug(f"URL: {endpoint.url}")
+                self.log.debug(f"\nHeaders:")
+                self.log.debug(json.dumps(dict(self.session.headers), indent=2))
+                self.log.debug(f"\nPayload:")
+                self.log.debug(json.dumps(payload, indent=2))
+                self.log.debug(f"{'='*80}\n")
 
             response = self.session.request(
                 method=endpoint.method, url=endpoint.url, data=json_payload, timeout=20
             )
 
             if self.detailed:
-                self.log.debug(f"--- RESPONSE [{response.status_code}] <---")
-                self.log.debug(f"Body: {response.text}")
+                self.log.debug(f"\n{'='*80}")
+                self.log.debug(f"API RESPONSE: {endpoint_name}")
+                self.log.debug(f"{'='*80}")
+                self.log.debug(f"Status Code: {response.status_code}")
+                self.log.debug(f"\nResponse Body:")
+                try:
+                    # Try to parse and pretty-print JSON response
+                    response_json = response.json()
+                    self.log.debug(json.dumps(response_json, indent=2))
+                except (json.JSONDecodeError, ValueError):
+                    # If not JSON, just print the raw text
+                    self.log.debug(response.text)
+                self.log.debug(f"{'='*80}\n")
 
             response.raise_for_status()
             return response
@@ -238,7 +255,7 @@ class ICBCApiClient:
         self.log.info(f"Checking for appointments at location ID {pos_id}...")
 
         payload = {
-            "aPos": pos_id,
+            "aPosID": pos_id,
             "examType": crit.examType,
             "examDate": crit.examDate,
             "prfDaysOfWeek": json.dumps(crit.prfDaysOfWeek, separators=(",", ":")),
