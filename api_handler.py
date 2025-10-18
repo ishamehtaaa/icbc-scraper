@@ -61,6 +61,48 @@ class APIHandler:
             log.error(f"Request error for {endpoint.url}: {e}")
             return None
 
+    def refresh_token(self) -> Optional[str]:
+        """
+        Request a new bearer token from the API.
+        
+        Returns:
+            The new bearer token string, or None if the request fails.
+        """
+        try:
+            # Build the token payload from environment variables
+            token_payload = TokenPayload(
+                drvrLastName=os.getenv("LAST_NAME"),
+                licenceNumber=os.getenv("LICENSE_NUMBER"),
+                keyword=os.getenv("KEYWORD")
+            )
+            
+            # Get the token endpoint from settings
+            token_endpoint = self.settings.endpoints.get("getToken")
+            if not token_endpoint:
+                log.error("Token endpoint not found in settings")
+                return None
+            
+            # Make the API request
+            response = self.session.request(
+                method=token_endpoint.method,
+                url=token_endpoint.url,
+                json=token_payload.dict(),
+                headers=self.settings.sharedHeaders
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                new_token = data.get("token")  # Adjust based on actual API response structure
+                log.info("Successfully obtained new bearer token")
+                return new_token
+            else:
+                log.error(f"Token refresh failed with status {response.status_code}: {response.text}")
+                return None
+                
+        except Exception as e:
+            log.error(f"Error refreshing token: {e}")
+            return None
+
     def update_token(self) -> None:
         log.info("Requesting new bearer token...")
         payload = {"drvrLastName": self.last_name, "licenceNumber": self.license_number, "keyword": self.keyword}
@@ -76,6 +118,7 @@ class APIHandler:
         else:
             log.critical("❌ Did not find a bearer token in the response. Check your credentials.")
             raise SystemExit("Authorization failed.")
+
 
     def fetch_and_cache_locations(self) -> bool:
         log.info("Fetching nearby testing locations to build cache...")

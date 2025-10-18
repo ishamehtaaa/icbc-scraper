@@ -45,6 +45,10 @@
       "url": "https://onlinebusiness.icbc.com/deas-api/v1/web/book",
       "method": "PUT"
     }
+    "listLocations": {
+      "url": "https://onlinebusiness.icbc.com/deas-api/v1/web/getPosByExam",
+      "method": "PUT"
+    }
   },
   "search_criteria": {
     "aPosID": [1],
