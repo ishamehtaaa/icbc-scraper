@@ -116,8 +116,6 @@ def interactive_setup(config_path):
         exam_types = {
             "7-R-1": "Class 7 Road Test (L - N)",
             "5-R-1": "Class 5 Road Test (N - Full)",
-            "4-R-1": "Class 4 Road Test",
-            # Add more as needed
         }
 
         log.info("\nAvailable exam types:")
@@ -132,10 +130,8 @@ def interactive_setup(config_path):
         if exam_type not in exam_types:
             log.warning(f"Warning: {exam_type} is not a recognized exam type.")
 
-        # Update settings before fetching locations
         settings.search_criteria.examType = exam_type
 
-        # Get available locations
         log.info("\nFetching available test locations for this exam type...")
         locations = api_client.fetch_all_locations()
 

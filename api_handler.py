@@ -7,15 +7,15 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import requests
+
 from models import (
     AppointmentSlot,
     BookAppointment,
     BookDrvrDriver,
     BookPayload,
     ConfirmationPayload,
+    Location,
     OtpPayload,
-    Pos,
-    TokenPayload,
     VerifyOtpPayload,
 )
 
@@ -32,7 +32,7 @@ class ICBCApiClient:
         self.keyword = os.getenv("KEYWORD")
         self.driver_id = settings.driver_id
         self.detailed = detailed
-        self.location_cache: Dict[int, Pos] = {}
+        self.location_cache: Dict[int, Location] = {}
 
         # Set default headers
         self.session.headers.update(settings.sharedHeaders)
@@ -190,7 +190,7 @@ class ICBCApiClient:
 
         for item in locations_data:
             try:
-                pos_data = Pos.parse_obj(item.get("pos"))
+                pos_data = Location.parse_obj(item.get("pos"))
                 self.location_cache[pos_data.posId] = pos_data
             except Exception as e:
                 self.log.warning(f"Could not parse a location item: {e}")
@@ -200,15 +200,15 @@ class ICBCApiClient:
         )
         return True
 
-    def fetch_all_locations(self) -> List[Pos]:
+    def fetch_all_locations(self) -> List[Location]:
         """
         Fetch all available locations for the specified exam type.
 
         Returns:
-            List of Pos objects representing all available locations
+            List of Location objects representing all available locations
         """
         crit = self.settings.search_criteria
-        payload = {"examType": crit.examType}
+        payload = {"examType": crit.examType, "startDate": crit.examDate}
 
         response = self._make_request("listLocations", payload)
         if not response:
@@ -217,24 +217,11 @@ class ICBCApiClient:
 
         try:
             locations_data = response.json()
-            if not isinstance(locations_data, list):
-                self.log.error(
-                    f"Expected a list of locations, but got: {type(locations_data)}"
-                )
-                return []
-
-            locations = []
-            for item in locations_data:
-                try:
-                    pos_data = Pos.parse_obj(item.get("pos"))
-                    locations.append(pos_data)
-                except Exception as e:
-                    self.log.warning(f"Could not parse a location item: {e}")
-
-            return locations
+            location_list = [Location(**loc) for loc in locations_data]
+            return location_list
         except json.JSONDecodeError:
             self.log.error(
-                "Failed to decode JSON from location data response.")
+                "Failed to decode JSON from all locations response.")
             return []
 
     def get_appointments(self, pos_id: int) -> Optional[List[AppointmentSlot]]:
@@ -251,7 +238,7 @@ class ICBCApiClient:
         self.log.info(f"Checking for appointments at location ID {pos_id}...")
 
         payload = {
-            "aPosID": pos_id,
+            "aPos": pos_id,
             "examType": crit.examType,
             "examDate": crit.examDate,
             "prfDaysOfWeek": json.dumps(crit.prfDaysOfWeek, separators=(",", ":")),

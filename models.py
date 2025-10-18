@@ -11,10 +11,17 @@ class TokenPayload(BaseModel):
 
 
 # Location models
-class Pos(BaseModel):
-    posId: int
+class Location(BaseModel):
+    address: str
+    address1: str
     agency: str
     city: str
+    lat: float
+    lng: float
+    posId: int
+    postcode: str
+    province: str
+    url: str
 
 
 # Appointment models

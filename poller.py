@@ -7,7 +7,6 @@ from typing import List
 
 from api_handler import ICBCApiClient
 from booking import BookingService
-from models import AppointmentSlot
 
 
 class AppointmentPoller:
