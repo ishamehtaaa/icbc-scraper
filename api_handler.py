@@ -1,19 +1,30 @@
-import requests
-import time
-import random
 import json
 import logging
 import os
-from typing import List, Dict, Any, Optional
-from app_config import (
-    Settings, AppointmentSlot, ConfirmationPayload, Pos, OtpPayload,
-    VerifyOtpPayload, BookPayload, BookAppointment, BookDrvrDriver
+import random
+import time
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+import requests
+from models import (
+    AppointmentSlot,
+    BookAppointment,
+    BookDrvrDriver,
+    BookPayload,
+    ConfirmationPayload,
+    OtpPayload,
+    Pos,
+    TokenPayload,
+    VerifyOtpPayload,
 )
 
-log = logging.getLogger()
 
-class APIHandler:
-    def __init__(self, settings: Settings, detailed: bool = False):
+class ICBCApiClient:
+    """Client for interacting with ICBC appointment booking API endpoints."""
+
+    def __init__(self, settings, detailed: bool = False):
+        self.log = logging.getLogger(__name__)
         self.settings = settings
         self.session = requests.Session()
         self.last_name = os.getenv("LAST_NAME")
@@ -23,192 +34,338 @@ class APIHandler:
         self.detailed = detailed
         self.location_cache: Dict[int, Pos] = {}
 
+        # Set default headers
         self.session.headers.update(settings.sharedHeaders)
+
+        # Get and set authorization token
         self.update_token()
 
-    def _make_request(self, endpoint_name: str, payload: Dict[str, Any]) -> Optional[requests.Response]:
+    def _make_request(
+        self, endpoint_name: str, payload: Dict[str, Any]
+    ) -> Optional[requests.Response]:
+        """
+        Make a request to a specific API endpoint.
+
+        Args:
+            endpoint_name: Name of the endpoint in settings
+            payload: Request payload
+
+        Returns:
+            Response object if successful, None otherwise
+        """
         endpoint = self.settings.endpoints.get(endpoint_name)
         if not endpoint:
-            log.error(f"Endpoint '{endpoint_name}' not found.")
+            self.log.error(f"Endpoint '{endpoint_name}' not found.")
             return None
+
         try:
-            json_payload = json.dumps(payload, separators=(',', ':'))
+            json_payload = json.dumps(payload, separators=(",", ":"))
 
             if self.detailed:
-                log.debug(f"--- REQUEST [{endpoint.method}] -> {endpoint.url} ---")
-                log.debug(f"Headers: {self.session.headers}")
-                log.debug(f"Payload: {json_payload}")
+                self.log.debug(
+                    f"--- REQUEST [{endpoint.method}] -> {endpoint.url} ---")
+                self.log.debug(f"Headers: {self.session.headers}")
+                self.log.debug(f"Payload: {json_payload}")
 
             response = self.session.request(
-                method=endpoint.method,
-                url=endpoint.url,
-                data=json_payload,
-                timeout=20
+                method=endpoint.method, url=endpoint.url, data=json_payload, timeout=20
             )
 
             if self.detailed:
-                log.debug(f"--- RESPONSE [{response.status_code}] <---")
-                log.debug(f"Body: {response.text}")
+                self.log.debug(f"--- RESPONSE [{response.status_code}] <---")
+                self.log.debug(f"Body: {response.text}")
 
             response.raise_for_status()
             return response
         except requests.exceptions.HTTPError as e:
-            log.error(f"HTTP error for {endpoint.url}: {e}")
+            self.log.error(f"HTTP error for {endpoint.url}: {e}")
             if e.response.status_code == 401:
-                log.critical("Authorization failed (401). Your token may have expired or credentials are wrong.")
+                self.log.critical(
+                    "Authorization failed (401). Your token may have expired or credentials are wrong."
+                )
             return None
         except requests.exceptions.RequestException as e:
-            log.error(f"Request error for {endpoint.url}: {e}")
+            self.log.error(f"Request error for {endpoint.url}: {e}")
             return None
+
+    def update_token(self) -> Optional[int]:
+        """
+        Request and set a new authorization bearer token.
+
+        Returns:
+            The driver ID if it was found in the response, None otherwise
+        """
+        self.log.info("Requesting new bearer token...")
+        payload = {
+            "drvrLastName": self.last_name,
+            "licenceNumber": self.license_number,
+            "keyword": self.keyword,
+        }
+        response = self._make_request("updateToken", payload)
+
+        if not response:
+            self.log.critical(
+                "Failed to get a response from the token endpoint. Halting."
+            )
+            raise SystemExit("Could not obtain an authorization token.")
+
+        auth_header = response.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            bearer_token = auth_header.removeprefix("Bearer ")
+            self.log.info("✅ Successfully obtained and set new bearer token.")
+            self.session.headers["Authorization"] = f"Bearer {bearer_token}"
+
+            # Try to extract driver ID from response
+            try:
+                response_data = response.json()
+                if "drvrId" in response_data:
+                    driver_id = int(response_data["drvrId"])
+                    self.log.info(f"✅ Found driver ID: {driver_id}")
+                    # Update the instance driver_id and settings
+                    self.driver_id = driver_id
+                    if hasattr(self.settings, "driver_id"):
+                        self.settings.driver_id = driver_id
+                    return driver_id
+            except (json.JSONDecodeError, ValueError) as e:
+                self.log.warning(
+                    f"Could not extract driver ID from response: {e}")
+
+            return None
+        else:
+            self.log.critical(
+                "❌ Did not find a bearer token in the response. Check your credentials."
+            )
+            raise SystemExit("Authorization failed.")
 
     def refresh_token(self) -> Optional[str]:
         """
         Request a new bearer token from the API.
-        
+
         Returns:
             The new bearer token string, or None if the request fails.
         """
         try:
-            # Build the token payload from environment variables
-            token_payload = TokenPayload(
-                drvrLastName=os.getenv("LAST_NAME"),
-                licenceNumber=os.getenv("LICENSE_NUMBER"),
-                keyword=os.getenv("KEYWORD")
-            )
-            
-            # Get the token endpoint from settings
-            token_endpoint = self.settings.endpoints.get("getToken")
-            if not token_endpoint:
-                log.error("Token endpoint not found in settings")
-                return None
-            
-            # Make the API request
-            response = self.session.request(
-                method=token_endpoint.method,
-                url=token_endpoint.url,
-                json=token_payload.dict(),
-                headers=self.settings.sharedHeaders
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                new_token = data.get("token")  # Adjust based on actual API response structure
-                log.info("Successfully obtained new bearer token")
-                return new_token
-            else:
-                log.error(f"Token refresh failed with status {response.status_code}: {response.text}")
-                return None
-                
+            # Update token and extract from session headers
+            self.update_token()
+            auth_header = self.session.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                return auth_header.removeprefix("Bearer ")
+            return None
         except Exception as e:
-            log.error(f"Error refreshing token: {e}")
+            self.log.error(f"Error refreshing token: {e}")
             return None
 
-    def update_token(self) -> None:
-        log.info("Requesting new bearer token...")
-        payload = {"drvrLastName": self.last_name, "licenceNumber": self.license_number, "keyword": self.keyword}
-        response = self._make_request("updateToken", payload)
-        if not response:
-            log.critical("Failed to get a response from the token endpoint. Halting.")
-            raise SystemExit("Could not obtain an authorization token.")
-        auth_header = response.headers.get('Authorization')
-        if auth_header and auth_header.startswith('Bearer '):
-            bearer_token = auth_header.removeprefix('Bearer ')
-            log.info("✅ Successfully obtained and set new bearer token.")
-            self.session.headers['Authorization'] = f"Bearer {bearer_token}"
-        else:
-            log.critical("❌ Did not find a bearer token in the response. Check your credentials.")
-            raise SystemExit("Authorization failed.")
+    def fetch_locations(self) -> bool:
+        """
+        Fetch and cache test location information.
 
-
-    def fetch_and_cache_locations(self) -> bool:
-        log.info("Fetching nearby testing locations to build cache...")
+        Returns:
+            True if successful, False otherwise
+        """
+        self.log.info("Fetching testing locations to build cache...")
         crit = self.settings.search_criteria
-        payload = {"lng": crit.longitude, "lat": crit.latitude, "examType": crit.examType, "startDate": crit.examDate}
+        payload = {
+            "lng": crit.longitude,
+            "lat": crit.latitude,
+            "examType": crit.examType,
+            "startDate": crit.examDate,
+        }
+
         response = self._make_request("getNearestPos", payload)
         if not response:
-            log.error("Failed to fetch location data. Aborting.")
+            self.log.error("Failed to fetch location data. Aborting.")
             return False
+
         try:
             locations_data = response.json()
             if not isinstance(locations_data, list):
-                log.error(f"Expected a list of locations, but got: {type(locations_data)}")
+                self.log.error(
+                    f"Expected a list of locations, but got: {type(locations_data)}"
+                )
                 return False
         except json.JSONDecodeError:
-            log.error("Failed to decode JSON from location data response.")
+            self.log.error(
+                "Failed to decode JSON from location data response.")
             return False
+
         for item in locations_data:
             try:
-                pos_data = Pos.parse_obj(item.get('pos'))
+                pos_data = Pos.parse_obj(item.get("pos"))
                 self.location_cache[pos_data.posId] = pos_data
             except Exception as e:
-                log.warning(f"Could not parse a location item: {e}")
-        log.info(f"Location cache populated with {len(self.location_cache)} entries.")
+                self.log.warning(f"Could not parse a location item: {e}")
+
+        self.log.info(
+            f"Location cache populated with {len(self.location_cache)} entries."
+        )
         return True
 
-    def get_all_appointments(self) -> Optional[List[AppointmentSlot]]:
+    def fetch_all_locations(self) -> List[Pos]:
+        """
+        Fetch all available locations for the specified exam type.
+
+        Returns:
+            List of Pos objects representing all available locations
+        """
         crit = self.settings.search_criteria
-        all_found_slots = []
-        for pos_id in crit.aPosID:
-            log.info(f"Checking for appointments at location ID {pos_id}...")
-            payload = {
-                "aPosID": pos_id,
-                "examType": crit.examType,
-                "examDate": crit.examDate,
-                "prfDaysOfWeek": json.dumps(crit.prfDaysOfWeek, separators=(',', ':')),
-                "prfPartsOfDay": json.dumps(crit.prfPartsOfDay, separators=(',', ':')),
-                "lastName": self.last_name,
-                "licenseNumber": self.license_number
-            }
-            response = self._make_request("getAppointments", payload)
-            if response:
+        payload = {"examType": crit.examType}
+
+        response = self._make_request("listLocations", payload)
+        if not response:
+            self.log.error("Failed to fetch all locations. Aborting.")
+            return []
+
+        try:
+            locations_data = response.json()
+            if not isinstance(locations_data, list):
+                self.log.error(
+                    f"Expected a list of locations, but got: {type(locations_data)}"
+                )
+                return []
+
+            locations = []
+            for item in locations_data:
                 try:
-                    slots_data = response.json()
-                    if isinstance(slots_data, list):
-                        for slot_dict in slots_data:
-                            try:
-                                all_found_slots.append(AppointmentSlot.parse_obj(slot_dict))
-                            except Exception as e:
-                                log.warning(f"Could not parse an appointment slot: {e}")
-                except json.JSONDecodeError:
-                    log.warning("Could not decode JSON from getAppointments response.")
+                    pos_data = Pos.parse_obj(item.get("pos"))
+                    locations.append(pos_data)
+                except Exception as e:
+                    self.log.warning(f"Could not parse a location item: {e}")
+
+            return locations
+        except json.JSONDecodeError:
+            self.log.error(
+                "Failed to decode JSON from location data response.")
+            return []
+
+    def get_appointments(self, pos_id: int) -> Optional[List[AppointmentSlot]]:
+        """
+        Get available appointments for a specific location.
+
+        Args:
+            pos_id: Location ID to check
+
+        Returns:
+            List of available appointment slots, or None if request failed
+        """
+        crit = self.settings.search_criteria
+        self.log.info(f"Checking for appointments at location ID {pos_id}...")
+
+        payload = {
+            "aPosID": pos_id,
+            "examType": crit.examType,
+            "examDate": crit.examDate,
+            "prfDaysOfWeek": json.dumps(crit.prfDaysOfWeek, separators=(",", ":")),
+            "prfPartsOfDay": json.dumps(crit.prfPartsOfDay, separators=(",", ":")),
+            "lastName": self.last_name,
+            "licenseNumber": self.license_number,
+        }
+
+        response = self._make_request("getAppointments", payload)
+        if not response:
+            return None
+
+        try:
+            slots_data = response.json()
+            if isinstance(slots_data, list):
+                result = []
+                for slot_dict in slots_data:
+                    try:
+                        result.append(AppointmentSlot.parse_obj(slot_dict))
+                    except Exception as e:
+                        self.log.warning(
+                            f"Could not parse an appointment slot: {e}")
+                return result
+            else:
+                self.log.warning(
+                    f"Expected a list of appointments, but got: {type(slots_data)}"
+                )
+                return []
+        except json.JSONDecodeError:
+            self.log.warning(
+                "Could not decode JSON from getAppointments response.")
+            return None
+
+    def get_all_appointments(self) -> Optional[List[AppointmentSlot]]:
+        """
+        Check for appointments across all configured locations.
+
+        Returns:
+            Combined list of all available appointment slots
+        """
+        all_found_slots = []
+
+        for pos_id in self.settings.search_criteria.aPosID:
+            slots = self.get_appointments(pos_id)
+            if slots:
+                all_found_slots.extend(slots)
+
+            # Add delay between requests to avoid rate limiting
             time.sleep(random.uniform(0.5, 1.5))
+
         return all_found_slots
 
     def lock_appointment(self, payload: ConfirmationPayload) -> Optional[Dict]:
-        log.info("Attempting to lock appointment...")
+        """
+        Lock an appointment slot.
+
+        Args:
+            payload: Appointment confirmation payload
+
+        Returns:
+            Response data if successful, None otherwise
+        """
+        self.log.info("Attempting to lock appointment...")
         response = self._make_request("lockAppointment", payload.model_dump())
         return response.json() if response else None
 
     def send_otp(self, booked_ts: str) -> Optional[Dict]:
-        log.info("Requesting OTP for the booked appointment...")
+        """
+        Request a one-time password for appointment confirmation.
+
+        Args:
+            booked_ts: Booking timestamp string
+
+        Returns:
+            Response data if successful, None otherwise
+        """
+        self.log.info("Requesting OTP for the booked appointment...")
         payload = OtpPayload(
-            bookedTs=booked_ts,
-            drvrID=self.driver_id,
-            method="S"
+            bookedTs=booked_ts, drvrID=self.driver_id, method="S"  # "S" for SMS
         )
         response = self._make_request("sendOTP", payload.model_dump())
         return response.json() if response else None
 
-    # UPDATED: Added new methods for the final two booking steps
     def verify_otp(self, booked_ts: str, otp_code: str) -> Optional[Dict]:
-        log.info("Verifying OTP code...")
+        """
+        Verify the one-time password.
+
+        Args:
+            booked_ts: Booking timestamp string
+            otp_code: OTP code received from user
+
+        Returns:
+            Response data if successful, None otherwise
+        """
+        self.log.info("Verifying OTP code...")
         payload = VerifyOtpPayload(
-            bookedTs=booked_ts,
-            drvrID=self.driver_id,
-            code=otp_code.strip()
+            bookedTs=booked_ts, drvrID=self.driver_id, code=otp_code.strip()
         )
         response = self._make_request("verifyOTP", payload.model_dump())
         return response.json() if response else None
 
     def confirm_booking(self) -> Optional[Dict]:
-        log.info("Sending final booking confirmation...")
+        """
+        Send final booking confirmation.
+
+        Returns:
+            Response data if successful, None otherwise
+        """
+        self.log.info("Sending final booking confirmation...")
         payload = BookPayload(
             userId=f"WEBD:{self.driver_id}",
             appointment=BookAppointment(
-                drvrDriver=BookDrvrDriver(
-                    drvrId=self.driver_id
-                )
-            )
+                drvrDriver=BookDrvrDriver(drvrId=self.driver_id)
+            ),
         )
         response = self._make_request("book", payload.model_dump())
         return response.json() if response else None

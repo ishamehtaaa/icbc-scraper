@@ -1,279 +1,382 @@
-import time
-import random
-import json
-import logging
+#!/usr/bin/env python3
+"""
+ICBC Appointment Finder
+
+A script to poll the ICBC website for available driving test appointments
+and automatically book an appointment when one is found.
+"""
+
 import argparse
+import logging
 import os
 import sys
 from datetime import datetime, timedelta
-from threading import Thread, Lock, Event
-from app_config import load_settings, setup_logging, format_appointment_message
-from app_config import ConfirmationPayload, ConfirmationDlExam, ConfirmationDrvrDriver
-from api_handler import APIHandler
 
-log = logging.getLogger()
+from api_handler import ICBCApiClient
+from app_config import load_settings, setup_logging
+from poller import AppointmentPoller
 
-# Global lock for thread-safe operations
-booking_lock = Lock()
-appointment_found = Event()
 
-def setup_logging(level=logging.INFO):
-    """Setup logging with thread names in the format."""
-    log = logging.getLogger()
-    if log.handlers:
-        return
-    
-    try:
-        import colorlog
-        handler = colorlog.StreamHandler()
-        handler.setFormatter(colorlog.ColoredFormatter(
-            '%(log_color)s%(asctime)s - [%(threadName)s] - %(levelname)s - %(message)s',
-            log_colors={
-                'DEBUG': 'cyan', 'INFO': 'white', 'WARNING': 'green',
-                'ERROR': 'red', 'CRITICAL': 'bold_red',
-            }))
-    except ImportError:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter(
-            '%(asctime)s - [%(threadName)s] - %(levelname)s - %(message)s'
-        ))
-    
-    log.addHandler(handler)
-    log.setLevel(level)
-
-def is_appointment_within_date_range(appointment_dt_str, max_days_ahead):
-    """
-    Check if the appointment date is within the specified number of days from today.
-    
-    Args:
-        appointment_dt_str: ISO format datetime string from appointmentDt
-        max_days_ahead: Maximum number of days in the future to consider
-        
-    Returns:
-        True if appointment is within range, False otherwise
-    """
-    try:
-        # Handle both string and dict types for appointmentDt
-        if isinstance(appointment_dt_str, dict):
-            appointment_dt_str = appointment_dt_str.get('date', '')
-        
-        appointment_date = datetime.fromisoformat(appointment_dt_str.replace('Z', '+00:00')).date()
-        max_date = (datetime.now() + timedelta(days=max_days_ahead)).date()
-        
-        if appointment_date > max_date:
-            log.debug(f"Appointment on {appointment_date} is beyond max date {max_date}")
-            return False
-        return True
-    except Exception as e:
-        log.error(f"Error parsing appointment date: {e}")
-        return False
-
-def polling_worker(thread_id, settings, args, max_days_ahead):
-    """
-    Worker function for each polling thread.
-    """
-    thread_log = logging.getLogger(f"Thread-{thread_id}")
-    
-    try:
-        handler = APIHandler(settings, detailed=args.detailed)
-        
-        if not handler.fetch_and_cache_locations():
-            thread_log.error("Could not fetch initial location data. Thread exiting.")
-            return
-        
-        thread_log.info(f"🚀 Thread {thread_id} started polling")
-        
-        request_count = 0
-        total_request_count = 0
-        max_requests = 60
-        timeout_duration = 120
-        token_refresh_threshold = 300
-        
-        while not appointment_found.is_set():
-            # Check if we need to refresh the bearer token
-            if total_request_count >= token_refresh_threshold:
-                with booking_lock:
-                    thread_log.warning(f"Reached {token_refresh_threshold} requests. Refreshing bearer token...")
-                    
-                    # Request a new bearer token via API
-                    new_token = handler.refresh_token()
-                    if not new_token:
-                        thread_log.error("Failed to refresh bearer token. Thread exiting.")
-                        return
-                    
-                    # Update the settings with the new token
-                    settings.sharedHeaders['Authorization'] = f'Bearer {new_token}'
-                    
-                    # Re-initialize the API handler with updated settings
-                    handler = APIHandler(settings, detailed=args.detailed)
-                    
-                    if not handler.fetch_and_cache_locations():
-                        thread_log.error("Could not fetch location data after token refresh. Thread exiting.")
-                        return
-                    
-                    thread_log.info("✅ Bearer token refreshed successfully. Resetting counters.")
-                    total_request_count = 0
-                    request_count = 0
-            
-            if request_count >= max_requests:
-                thread_log.warning(f"Rate limit reached ({max_requests} requests). "
-                           f"Waiting {timeout_duration} seconds...")
-                time.sleep(timeout_duration)
-                request_count = 0
-                thread_log.info("Rate limit timeout completed. Resuming requests.")
-
-            # Increment request counter
-            request_count += 1
-            total_request_count += 1
-            
-            thread_log.debug(f"Request count: {total_request_count} (rate limit cycle: {request_count}/{max_requests})")
-
-            available_slots = handler.get_all_appointments()
-            if available_slots is None:
-                thread_log.error("Failed to retrieve appointments in this poll. Will try again.")
-            elif available_slots:
-                # Filter appointments based on date range
-                filtered_slots = [
-                    slot for slot in available_slots 
-                    if is_appointment_within_date_range(slot.appointmentDt.date, max_days_ahead)
-                ]
-                
-                if not filtered_slots:
-                    thread_log.info(f"Found {len(available_slots)} appointment(s), but all are beyond {max_days_ahead} days. Skipping.")
-                else:
-                    # Use lock to ensure only one thread books
-                    with booking_lock:
-                        if appointment_found.is_set():
-                            thread_log.info("Another thread already found an appointment. Stopping.")
-                            return
-                        
-                        appointment_found.set()
-                        slot_to_book = filtered_slots[0]
-                        thread_log.warning(format_appointment_message(slot_to_book, handler.location_cache))
-
-                        if args.dry_run:
-                            thread_log.warning("Dry Run: Appointment found, but booking is skipped.")
-                            thread_log.info("Thread will now exit as its task is complete in dry run mode.")
-                            return
-
-                        crit = settings.search_criteria
-                        payload = ConfirmationPayload(
-                            appointmentDt=slot_to_book.appointmentDt,
-                            dlExam=ConfirmationDlExam(code=crit.examType, description=f"{crit.examType}-ROAD"),
-                            drvrDriver=ConfirmationDrvrDriver(drvrId=settings.driver_id),
-                            drscDrvSchl={},
-                            instructorDlNum=None,
-                            bookedTs=datetime.now().isoformat(timespec='seconds'),
-                            startTm=slot_to_book.startTm,
-                            endTm=slot_to_book.endTm,
-                            posId=slot_to_book.posId,
-                            resourceId=slot_to_book.resourceId,
-                            signature=slot_to_book.signature
-                        )
-                        response = handler.lock_appointment(payload)
-                        if response:
-                            thread_log.warning(f"Appointment locked successfully! Response:\n{json.dumps(response, indent=2)}")
-
-                            otp_response = handler.send_otp(payload.bookedTs)
-                            if otp_response:
-                                thread_log.info(f"OTP request successful! Response:\n{json.dumps(otp_response, indent=2)}")
-
-                                # UPDATED: Add interactive OTP prompt and final booking steps
-                                otp_code = input("📲 Please enter the OTP you received and press Enter: ")
-                                if not otp_code or not otp_code.strip().isdigit():
-                                    thread_log.critical("Invalid or empty OTP entered. Halting.")
-                                    return
-
-                                verify_response = handler.verify_otp(payload.bookedTs, otp_code)
-                                if verify_response:
-                                    thread_log.info(f"OTP verification successful!")
-
-                                    book_response = handler.confirm_booking()
-                                    if book_response:
-                                        thread_log.warning(f"✅ APPOINTMENT CONFIRMED! Final Response:\n{json.dumps(book_response, indent=2)}")
-                                    else:
-                                        thread_log.error("Final booking confirmation failed.")
-                                else:
-                                    thread_log.error("OTP verification failed.")
-                            else:
-                                thread_log.error("OTP request failed.")
-                        else:
-                            thread_log.error("Booking lock request failed.")
-
-                        thread_log.info("Thread has completed its task and will now exit.")
-                        return
-
-            else:
-                thread_log.debug("No new appointments found in this poll.")
-
-            jitter = random.uniform(-settings.polling.randomJitterSeconds, settings.polling.randomJitterSeconds)
-            sleep_duration = settings.polling.baseIntervalSeconds + jitter
-            thread_log.debug(f"Waiting for {sleep_duration:.2f} seconds...")
-            time.sleep(max(0, sleep_duration))
-
-    except Exception as e:
-        thread_log.error(f"An unexpected error occurred in thread: {e}", exc_info=args.detailed)
-
-def main():
+def setup_argument_parser():
+    """Configure and return command line argument parser."""
     parser = argparse.ArgumentParser(
         description="Poll the ICBC website for available driving test appointments.",
-        formatter_class=argparse.RawTextHelpFormatter
+        formatter_class=argparse.RawTextHelpFormatter,
     )
-    parser.add_argument("--detailed", action="store_true", help="Enable detailed logging.")
-    parser.add_argument("--dry-run", action="store_true", help="Run the script without attempting to book an appointment.")
-    parser.add_argument("--max-days", type=int, default=30, 
-                       help="Maximum number of days ahead to search for appointments (default: 30)")
-    parser.add_argument("--threads", type=int, default=1, 
-                       help="Number of concurrent polling threads to run (default: 1, max recommended: 5)")
+    parser.add_argument(
+        "--detailed",
+        action="store_true",
+        help="Enable detailed logging including API requests/responses.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run the script without attempting to book an appointment.",
+    )
+    parser.add_argument(
+        "--max-days",
+        type=int,
+        default=30,
+        help="Maximum number of days ahead to search for appointments (default: 30)",
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=1,
+        help="Number of concurrent polling threads to run (default: 1, max recommended: 5)",
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="config.json",
+        help="Path to configuration file (default: config.json)",
+    )
+    parser.add_argument(
+        "--setup",
+        action="store_true",
+        help="Interactive setup to generate .env and update config file",
+    )
+    parser.add_argument(
+        "--list-locations",
+        action="store_true",
+        help="List all available test locations and exit",
+    )
+
+    return parser
+
+
+def interactive_setup(config_path):
+    """Run interactive setup to generate .env file and update config."""
+    log = logging.getLogger(__name__)
+
+    log.info("=== Interactive Setup ===")
+    log.info("This will help you configure your ICBC appointment finder.")
+
+    # Check if .env already exists
+    if os.path.exists(".env"):
+        overwrite = input(
+            "An .env file already exists. Overwrite it? (y/n): ").lower()
+        if overwrite != "y":
+            log.info("Setup cancelled. Using existing .env file.")
+            return
+
+    # Get user credentials
+    log.info("\n--- Personal Information ---")
+    last_name = input("Enter your last name: ")
+    license_number = input("Enter your license number (e.g., 1234567): ")
+    keyword = input(
+        "Enter your keyword (security word you set on your ICBC account): ")
+
+    # Write .env file
+    with open(".env", "w") as f:
+        f.write(f'LAST_NAME="{last_name}"\n')
+        f.write(f'LICENSE_NUMBER="{license_number}"\n')
+        f.write(f'KEYWORD="{keyword}"\n')
+
+    log.info("✅ .env file created successfully!")
+
+    # Try to load settings
+    settings = load_settings(config_path)
+    if not settings:
+        log.error("Failed to load settings. Please check your configuration file.")
+        return
+
+    # Update config if needed
+    log.info("\n--- Exam Configuration ---")
+    log.info("Now let's configure your exam search preferences.")
+
+    # Initialize API client to get available locations and driver ID
+    try:
+        api_client = ICBCApiClient(settings)
+        # Driver ID should now be automatically obtained during token authentication
+        if api_client.driver_id:
+            log.info(f"✅ Detected your driver ID: {api_client.driver_id}")
+
+        # Get available exam types
+        exam_types = {
+            "7-R-1": "Class 7 Road Test (L - N)",
+            "5-R-1": "Class 5 Road Test (N - Full)",
+            "4-R-1": "Class 4 Road Test",
+            # Add more as needed
+        }
+
+        log.info("\nAvailable exam types:")
+        for code, description in exam_types.items():
+            log.info(f"  {code}: {description}")
+
+        exam_type = (
+            input(
+                f"\nSelect exam type [{settings.search_criteria.examType}]: ")
+            or settings.search_criteria.examType
+        )
+        if exam_type not in exam_types:
+            log.warning(f"Warning: {exam_type} is not a recognized exam type.")
+
+        # Update settings before fetching locations
+        settings.search_criteria.examType = exam_type
+
+        # Get available locations
+        log.info("\nFetching available test locations for this exam type...")
+        locations = api_client.fetch_all_locations()
+
+        if not locations:
+            log.warning(
+                "Could not fetch locations. Will keep current settings.")
+        else:
+            log.info("\nAvailable test locations:")
+            for i, loc in enumerate(locations, 1):
+                log.info(f"  {i}. {loc.agency} ({loc.city}) - ID: {loc.posId}")
+
+            location_input = input(
+                "\nEnter location numbers separated by commas (or 'all'): "
+            )
+            if location_input.lower() == "all":
+                location_ids = [loc.posId for loc in locations]
+            else:
+                try:
+                    # Parse 1-based indices to location IDs
+                    indices = [
+                        int(idx.strip())
+                        for idx in location_input.split(",")
+                        if idx.strip()
+                    ]
+                    location_ids = [
+                        locations[i - 1].posId
+                        for i in indices
+                        if 0 < i <= len(locations)
+                    ]
+
+                    if not location_ids:
+                        log.warning(
+                            "No valid locations selected. Keeping current settings."
+                        )
+                        location_ids = settings.search_criteria.aPosID
+                except (ValueError, IndexError):
+                    log.warning(
+                        "Invalid location selection. Keeping current settings.")
+                    location_ids = settings.search_criteria.aPosID
+
+            # Update settings
+            settings.search_criteria.aPosID = location_ids
+
+            # Get date range
+            try:
+                days_input = input(f"\nHow many days ahead to search? [30]: ")
+                max_days = int(days_input) if days_input.strip() else 30
+
+                # Update start date to today
+                today = datetime.now().strftime("%Y-%m-%d")
+                settings.search_criteria.examDate = today
+
+                log.info(f"✅ Start date set to {today}")
+                log.info(f"✅ Will search up to {max_days} days ahead")
+            except ValueError:
+                log.warning("Invalid number of days. Using default (30).")
+
+            # Preferred days of week
+            log.info("\nPreferred days of week:")
+            log.info("  0 = Sunday, 1 = Monday, 2 = Tuesday, 3 = Wednesday")
+            log.info("  4 = Thursday, 5 = Friday, 6 = Saturday, all = All days")
+
+            days_input = input(
+                f"Enter preferred days (comma separated) [all]: ")
+            if days_input.lower() == "all" or not days_input.strip():
+                days = [0, 1, 2, 3, 4, 5, 6]
+            else:
+                try:
+                    days = [int(d.strip())
+                            for d in days_input.split(",") if d.strip()]
+                    days = [d for d in days if 0 <= d <= 6]
+                    if not days:
+                        days = [0, 1, 2, 3, 4, 5, 6]
+                except ValueError:
+                    log.warning("Invalid day selection. Using all days.")
+                    days = [0, 1, 2, 3, 4, 5, 6]
+
+            settings.search_criteria.prfDaysOfWeek = days
+
+            # Preferred time of day
+            log.info("\nPreferred time of day:")
+            log.info("  0 = Morning, 1 = Afternoon, both = Both")
+
+            time_input = input("Enter preferred times [both]: ").lower()
+            if time_input == "0":
+                parts_of_day = [0]
+            elif time_input == "1":
+                parts_of_day = [1]
+            else:
+                parts_of_day = [0, 1]
+
+            settings.search_criteria.prfPartsOfDay = parts_of_day
+
+            # Save updated config
+            import json
+
+            with open(config_path, "w") as f:
+                # Convert Pydantic model to dict, then to JSON
+                config_dict = settings.dict()
+                json.dump(config_dict, f, indent=2)
+
+            log.info(f"\n✅ Configuration saved to {config_path}")
+            log.info("Setup complete! You can now run the script to start polling.")
+
+    except Exception as e:
+        log.error(f"Setup failed: {e}")
+        log.info("You may need to manually edit your config.json file.")
+
+
+def list_locations(settings):
+    """Fetch and display all available test locations."""
+    log = logging.getLogger(__name__)
+
+    log.info("Fetching all available test locations...")
+    api_client = ICBCApiClient(settings)
+
+    # Get all locations for the configured exam type
+    locations = api_client.fetch_all_locations()
+
+    if not locations:
+        log.error("Could not fetch locations or none are available.")
+        return False
+
+    log.info(
+        f"\nFound {len(locations)} locations for exam type {settings.search_criteria.examType}:"
+    )
+    log.info("=" * 60)
+    log.info(f"{'ID':<6} | {'Agency':<30} | {'City':<20}")
+    log.info("-" * 60)
+
+    for loc in sorted(locations, key=lambda x: x.city):
+        log.info(f"{loc.posId:<6} | {loc.agency:<30} | {loc.city:<20}")
+
+    log.info("=" * 60)
+    log.info(
+        "\nTo use these locations, update the 'aPosID' field in your config.json file."
+    )
+    return True
+
+
+def main():
+    """Main entry point for the application."""
+    # Parse command line arguments
+    parser = setup_argument_parser()
     args = parser.parse_args()
 
+    # Setup logging
     setup_logging(logging.DEBUG if args.detailed else logging.INFO)
+    log = logging.getLogger(__name__)
 
     try:
-        settings = load_settings("config.json")
+        # Check for special modes
+        if args.setup:
+            interactive_setup(args.config)
+            return
+
+        # Check if config file exists and create from template if not
+        if not os.path.exists(args.config):
+            template_path = "template.config.json"
+            if os.path.exists(template_path):
+                import shutil
+
+                shutil.copyfile(template_path, args.config)
+                log.info(
+                    f"Created new config file from template: {args.config}")
+            else:
+                log.critical(
+                    f"Configuration file '{args.config}' not found and no template available."
+                )
+                sys.exit(1)
+
+        # Check if .env file exists
+        if not os.path.exists(".env"):
+            log.warning(
+                "No .env file found. Please run the setup first: python main.py --setup"
+            )
+            if input("Would you like to run setup now? (y/n): ").lower() == "y":
+                interactive_setup(args.config)
+                return
+            else:
+                log.critical("Cannot continue without credentials. Exiting.")
+                sys.exit(1)
+
+        # Load settings
+        settings = load_settings(args.config)
         if not settings:
+            log.critical(f"Failed to load settings from {args.config}")
             sys.exit(1)
+
+        # Initialize API client to get driver ID if not already set
+        if not settings.driver_id:
+            log.info(
+                "Driver ID not found in settings. Attempting to get it from the API..."
+            )
+            api_client = ICBCApiClient(settings)
+            # Driver ID should now be set in settings if it was successfully retrieved
+
+            # Save updated settings with driver ID
+            if settings.driver_id:
+                import json
+
+                with open(args.config, "w") as f:
+                    config_dict = settings.dict()
+                    json.dump(config_dict, f, indent=2)
+                log.info(
+                    f"✅ Updated config with driver ID: {settings.driver_id}")
+
+        # Check for list locations mode
+        if args.list_locations:
+            if list_locations(settings):
+                sys.exit(0)
+            else:
+                sys.exit(1)
 
         # Validate thread count
         num_threads = max(1, min(args.threads, 10))  # Limit between 1 and 10
         if num_threads != args.threads:
-            log.warning(f"Thread count adjusted to {num_threads} (must be between 1 and 10)")
-
-        log.info("--- Starting Appointment Polling Script ---")
-        if args.dry_run:
-            log.warning("DRY RUN MODE IS ENABLED. No appointment will be booked.")
-        log.info(f"Polling for locations: {settings.search_criteria.aPosID}")
-        log.info(f"Maximum days ahead: {args.max_days}")
-        log.info(f"Number of polling threads: {num_threads}")
-        log.info("Press Ctrl+C to stop the script.")
-
-        # Create and start polling threads
-        threads = []
-        for i in range(num_threads):
-            thread = Thread(
-                target=polling_worker,
-                args=(i + 1, settings, args, args.max_days),
-                daemon=True
+            log.warning(
+                f"Thread count adjusted to {num_threads} (must be between 1 and 10)"
             )
-            thread.start()
-            threads.append(thread)
-            # Small delay between thread starts to avoid simultaneous initialization
-            time.sleep(0.5)
 
-        # Wait for all threads to complete
-        for thread in threads:
-            thread.join()
+        # Start the appointment poller
+        poller = AppointmentPoller(
+            settings=settings,
+            max_days_ahead=args.max_days,
+            dry_run=args.dry_run,
+            detailed=args.detailed,
+        )
 
-        log.info("All threads have completed. Script exiting.")
+        poller.start(num_threads=num_threads)
+        poller.wait_for_completion()
 
     except KeyboardInterrupt:
         log.info("\nScript stopped by user. Goodbye! 👋")
     except SystemExit as e:
-        log.critical(f"A critical error occurred, and the script had to exit: {e}")
+        if str(e) != "0":
+            log.critical(
+                f"A critical error occurred, and the script had to exit: {e}")
     except Exception as e:
         log.error(f"An unexpected error occurred: {e}", exc_info=args.detailed)
 
+
 if __name__ == "__main__":
     main()
-
-
